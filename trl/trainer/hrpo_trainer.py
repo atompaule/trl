@@ -1083,6 +1083,38 @@ class HRPOTrainer(BaseTrainer):
         if self._step % self.current_gradient_accumulation_steps == 0:
             self._metrics["train"]["step_time"].append(self._current_train_step_time)
             self._current_train_step_time = 0.0
+            
+            _model = model.base_model.model.base_model
+            
+            if hasattr(_model, "latent_gate_a"):
+                grad_Lambda = _model.latent_gate_a.Lambda.grad
+                if grad_Lambda is not None:
+                    wandb.log({
+                        "lambda/grad_mean": grad_Lambda.mean().item(),
+                        "lambda/grad_std": grad_Lambda.std().item(),
+                        "lambda/grad_min": grad_Lambda.min().item(),
+                        "lambda/grad_max": grad_Lambda.max().item(),
+                        "lambda/mean": _model.latent_gate_a.Lambda.mean().item(),
+                    }, commit=False)
+                
+                grad_r = _model.latent_gate_r.weight.grad
+                if grad_r is not None:
+                    wandb.log({
+                        "r/grad_mean": grad_r.mean().item(),
+                        "r/grad_std": grad_r.std().item(),
+                        "r/grad_min": grad_r.min().item(),
+                        "r/grad_max": grad_r.max().item(),
+                    }, commit=False)
+                    
+                grad_i = _model.latent_gate_i.weight.grad
+                if grad_i is not None:
+                    wandb.log({
+                        "i/grad_mean": grad_i.mean().item(),
+                        "i/grad_std": grad_i.std().item(),
+                        "i/grad_min": grad_i.min().item(),
+                        "i/grad_max": grad_i.max().item(),
+                    }, commit=False)
+
         return output
 
     @profiling_decorator
@@ -1771,6 +1803,9 @@ class HRPOTrainer(BaseTrainer):
             output["token_type_ids"] = forward_kwargs["token_type_ids"]
         if images is not None:
             output["num_images"] = num_images
+
+        output["thinking_mask"] = thinking_mask
+        output["soft_embeds"] = soft_embeds
         
         return output
 
@@ -1849,6 +1884,7 @@ class HRPOTrainer(BaseTrainer):
             image_sizes=inputs.get("image_sizes"),
             token_type_ids=inputs.get("token_type_ids"),
             thinking_mask=inputs.get("thinking_mask"),
+            soft_embeds=inputs.get("soft_embeds"),
         )
 
         if self.top_entropy_quantile < 1.0:
