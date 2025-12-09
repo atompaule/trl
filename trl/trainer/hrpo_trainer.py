@@ -30,7 +30,13 @@ import torch
 import torch.utils.data
 import transformers
 from accelerate import logging
-from accelerate.utils import broadcast_object_list, gather, gather_object, is_peft_model, set_seed
+from accelerate.utils import (
+    broadcast_object_list,
+    gather,
+    gather_object,
+    is_peft_model,
+    set_seed,
+)
 from datasets import Dataset, IterableDataset
 from torch import nn
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -50,7 +56,11 @@ from transformers import (
     is_wandb_available,
 )
 from transformers.trainer_utils import seed_worker
-from transformers.utils import is_datasets_available, is_peft_available, is_rich_available
+from transformers.utils import (
+    is_datasets_available,
+    is_peft_available,
+    is_rich_available,
+)
 
 from ..data_utils import (
     apply_chat_template,
@@ -61,7 +71,12 @@ from ..data_utils import (
 from ..extras.profiling import profiling_context, profiling_decorator
 from ..extras.vllm_client import VLLMClient
 from ..import_utils import is_liger_kernel_available, is_vllm_available
-from ..models import prepare_deepspeed, prepare_fsdp, prepare_peft_model, unwrap_model_for_generation
+from ..models import (
+    prepare_deepspeed,
+    prepare_fsdp,
+    prepare_peft_model,
+    unwrap_model_for_generation,
+)
 from ..models.utils import _ForwardRedirection
 from .base_trainer import BaseTrainer
 from .callbacks import SyncRefModelCallback
@@ -84,7 +99,6 @@ from .utils import (
     split_tensor_dict,
     unsplit_pixel_values_by_grid,
 )
-
 
 if is_peft_available():
     from peft import PeftConfig, PeftModel
@@ -873,6 +887,8 @@ class HRPOTrainer(BaseTrainer):
         pixel_attention_mask=None,
         image_sizes=None,
         token_type_ids=None,
+        thinking_mask=None,
+        soft_embeds=None,
     ) -> dict[str, torch.Tensor | None]:
         """Compute log-probs and (optionally) entropies for each token."""
         batch_size = batch_size or input_ids.size(0)  # Chunk inputs into smaller batches to reduce memory peak
@@ -884,6 +900,10 @@ class HRPOTrainer(BaseTrainer):
 
             # Build model inputs - check if the model supports logits_to_keep (some models and VLMs don't)
             model_inputs = {"input_ids": input_ids_batch, "attention_mask": attention_mask_batch}
+            if thinking_mask is not None:
+                model_inputs["thinking_mask"] = thinking_mask[start : start + batch_size]
+            if soft_embeds is not None:
+                model_inputs["soft_embeds"] = soft_embeds[start : start + batch_size]
             if image_grid_thw is not None and pixel_values is not None:
                 rows_per_image = image_grid_thw.prod(dim=-1)
                 rows_per_sample = torch.split(rows_per_image, num_images)
@@ -1411,7 +1431,7 @@ class HRPOTrainer(BaseTrainer):
                 torch.no_grad(),
                 FSDP.summon_full_params(self.model_wrapped, recurse=False) if self.is_fsdp_enabled else nullcontext(),
             ):
-                prompt_completion_ids = unwrapped_model.generate(
+                prompt_completion_ids, soft_embeds, thinking_mask = unwrapped_model.generate(
                     **generate_inputs, generation_config=self.generation_config, disable_compile=True, processing_class=self.processing_class
                 )
             # Compute prompt length and extract completion ids
@@ -1430,13 +1450,13 @@ class HRPOTrainer(BaseTrainer):
             logprobs = None  # not used in this case
             extra_fields = {}  # No extra fields for non-rollout_func paths
 
-        return prompt_ids, completion_ids, logprobs, extra_fields
+        return prompt_ids, completion_ids, soft_embeds, thinking_mask, logprobs, extra_fields
 
     def _generate(self, prompts: list):
         device = self.accelerator.device
         mode = "train" if self.model.training else "eval"
 
-        prompt_ids, completion_ids, logprobs, extra_fields = self._generate_single_turn(prompts)
+        prompt_ids, completion_ids, soft_embeds, thinking_mask, logprobs, extra_fields = self._generate_single_turn(prompts)
 
         # Get completion length per sequence, used for logging
         prompt_lengths = torch.tensor([len(ids) for ids in prompt_ids], device=device)
@@ -1468,7 +1488,7 @@ class HRPOTrainer(BaseTrainer):
         self._metrics[mode]["completions/min_terminated_length"].append(term_completion_lengths.float().min().item())
         self._metrics[mode]["completions/max_terminated_length"].append(term_completion_lengths.float().max().item())
 
-        return prompt_ids, completion_ids, total_completion_tokens, logprobs, extra_fields
+        return prompt_ids, completion_ids, soft_embeds, thinking_mask, total_completion_tokens, logprobs, extra_fields
 
     def _generate_and_score_completions(
         self, inputs: list[dict[str, torch.Tensor | Any]]
@@ -1497,7 +1517,7 @@ class HRPOTrainer(BaseTrainer):
                 for prompt, image_list in zip(prompts, images, strict=True)
             ]
 
-        prompt_ids_list, completion_ids_list, num_items_in_batch, sampling_per_token_logps_list, extra_fields = (
+        prompt_ids_list, completion_ids_list, soft_embeds, thinking_mask, num_items_in_batch, sampling_per_token_logps_list, extra_fields = (
             self._generate(prompts)
         )
 
@@ -1523,6 +1543,7 @@ class HRPOTrainer(BaseTrainer):
             completion_mask = completion_mask * (~is_truncated).unsqueeze(1).int()
 
         # Concatenate prompt_mask with completion_mask for logit computation
+        # prompt_completion_ids: (batch_size, prompt_length + completion_length)
         prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)  # (B, P+C)
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
 
@@ -1602,6 +1623,8 @@ class HRPOTrainer(BaseTrainer):
                             logits_to_keep,
                             batch_size=batch_size,
                             num_images=num_images,
+                            thinking_mask=thinking_mask,
+                            soft_embeds=soft_embeds,
                             **forward_kwargs,  # may contain pixel_values, image_grid_thw, pixel_attention_mask and image_sizes
                         )
             else:
@@ -1748,6 +1771,7 @@ class HRPOTrainer(BaseTrainer):
             output["token_type_ids"] = forward_kwargs["token_type_ids"]
         if images is not None:
             output["num_images"] = num_images
+        
         return output
 
     def compute_liger_loss(self, unwrapped_model, inputs):
@@ -1824,6 +1848,7 @@ class HRPOTrainer(BaseTrainer):
             pixel_attention_mask=inputs.get("pixel_attention_mask"),
             image_sizes=inputs.get("image_sizes"),
             token_type_ids=inputs.get("token_type_ids"),
+            thinking_mask=inputs.get("thinking_mask"),
         )
 
         if self.top_entropy_quantile < 1.0:
