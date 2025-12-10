@@ -1087,33 +1087,28 @@ class HRPOTrainer(BaseTrainer):
             _model = model.base_model.model.base_model
             
             if hasattr(_model, "latent_gate_a"):
+                metrics = self._metrics["train"]
                 grad_Lambda = _model.latent_gate_a.Lambda.grad
                 if grad_Lambda is not None:
-                    wandb.log({
-                        "lambda/grad_mean": grad_Lambda.mean().item(),
-                        "lambda/grad_std": grad_Lambda.std().item(),
-                        "lambda/grad_min": grad_Lambda.min().item(),
-                        "lambda/grad_max": grad_Lambda.max().item(),
-                        "lambda/mean": _model.latent_gate_a.Lambda.mean().item(),
-                    }, commit=False)
+                    metrics["lambda/grad_mean"].append(grad_Lambda.mean().item())
+                    metrics["lambda/grad_std"].append(grad_Lambda.std().item())
+                    metrics["lambda/grad_min"].append(grad_Lambda.min().item())
+                    metrics["lambda/grad_max"].append(grad_Lambda.max().item())
+                    metrics["lambda/mean"].append(_model.latent_gate_a.Lambda.mean().item())
                 
                 grad_r = _model.latent_gate_r.weight.grad
                 if grad_r is not None:
-                    wandb.log({
-                        "r/grad_mean": grad_r.mean().item(),
-                        "r/grad_std": grad_r.std().item(),
-                        "r/grad_min": grad_r.min().item(),
-                        "r/grad_max": grad_r.max().item(),
-                    }, commit=False)
+                    metrics["r/grad_mean"].append(grad_r.mean().item())
+                    metrics["r/grad_std"].append(grad_r.std().item())
+                    metrics["r/grad_min"].append(grad_r.min().item())
+                    metrics["r/grad_max"].append(grad_r.max().item())
                     
                 grad_i = _model.latent_gate_i.weight.grad
                 if grad_i is not None:
-                    wandb.log({
-                        "i/grad_mean": grad_i.mean().item(),
-                        "i/grad_std": grad_i.std().item(),
-                        "i/grad_min": grad_i.min().item(),
-                        "i/grad_max": grad_i.max().item(),
-                    }, commit=False)
+                    metrics["i/grad_mean"].append(grad_i.mean().item())
+                    metrics["i/grad_std"].append(grad_i.std().item())
+                    metrics["i/grad_min"].append(grad_i.min().item())
+                    metrics["i/grad_max"].append(grad_i.max().item())
 
         return output
 
