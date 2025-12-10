@@ -1648,6 +1648,9 @@ class HRPOTrainer(BaseTrainer):
                     )
                 else:
                     with self.accelerator.unwrap_model(self.model).disable_adapter():
+                        # TODO: THIS WON'T WORK
+                        # latent gates are ModulesToSaveWrappers, there'll be some latent gate param values nan, sometimes, for some reason
+                        # fix this, potentially by providing an actual ref_model
                         ref_per_token_logps, _ = self._get_per_token_logps_and_entropies(
                             self.model,
                             prompt_completion_ids,
@@ -1894,6 +1897,7 @@ class HRPOTrainer(BaseTrainer):
 
         # Compute the KL divergence between the model and the reference model
         if self.beta != 0.0:
+            # TODO: fix weird latent gate params being nan in self.accelerator.unwrap_model(self.model).disable_adapter() 
             ref_per_token_logps = inputs["ref_per_token_logps"]
             per_token_kl = (
                 torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
