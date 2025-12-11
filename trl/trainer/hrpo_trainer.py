@@ -1109,6 +1109,9 @@ class HRPOTrainer(BaseTrainer):
             
             _model = model.base_model.model.base_model
             
+            # note to self: even though Lambda is of dtype fp32 in the "master" model in mixed precision, the following live model params used for forward pass are of dtype bf16
+            # this is why tiny changes in Lambda will not show up here until they cross the bf16 precision threshold
+            # in bf16, values like Lambda's of around 7.0 will only be able to discern differences of around 0.03
             if hasattr(_model, "latent_gate_a"):
                 if not hasattr(self, "_Lambda_init"):
                     self._Lambda_init = _model.latent_gate_a.Lambda.detach().clone().cpu()
