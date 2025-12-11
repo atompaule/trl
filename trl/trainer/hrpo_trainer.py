@@ -1074,7 +1074,28 @@ class HRPOTrainer(BaseTrainer):
         elif self.vllm_mode == "colocate":
             self.llm.reset_prefix_cache()
 
+    def _register_latent_gate_hooks(self, model):
+        self._hidden_ratio_values = []
+        
+        def hook_fn(module, input, output):
+            # output is a_t
+            if isinstance(output, torch.Tensor):
+                 a_t = output.detach()
+                 # Ensure value in [0, 1] for sqrt safety
+                 val = 1 - a_t.pow(2)
+                 val = torch.clamp(val, min=1e-6)
+                 hidden_ratio = torch.sqrt(val)
+                 self._hidden_ratio_values.append(hidden_ratio.mean().item())
+        
+        for name, module in model.named_modules():
+            if "LatentGateA" in module.__class__.__name__:
+                module.register_forward_hook(hook_fn)
+
     def training_step(self, model, inputs, num_items_in_batch):
+        if not hasattr(self, "_hooks_registered"):
+             self._register_latent_gate_hooks(model)
+             self._hooks_registered = True
+
         time_before = time.perf_counter()
         output = super().training_step(model, inputs, num_items_in_batch)
         self._step += 1
@@ -1087,30 +1108,75 @@ class HRPOTrainer(BaseTrainer):
             _model = model.base_model.model.base_model
             
             if hasattr(_model, "latent_gate_a"):
-                metrics = self._metrics["train"]
-                grad_Lambda = _model.latent_gate_a.Lambda.grad
-                if grad_Lambda is not None:
-                    metrics["lambda/grad_mean"].append(grad_Lambda.mean().item())
-                    metrics["lambda/grad_std"].append(grad_Lambda.std().item())
-                    metrics["lambda/grad_min"].append(grad_Lambda.min().item())
-                    metrics["lambda/grad_max"].append(grad_Lambda.max().item())
-                    metrics["lambda/mean"].append(_model.latent_gate_a.Lambda.mean().item())
-                
-                grad_r = _model.latent_gate_r.weight.grad
-                if grad_r is not None:
-                    metrics["r/grad_mean"].append(grad_r.mean().item())
-                    metrics["r/grad_std"].append(grad_r.std().item())
-                    metrics["r/grad_min"].append(grad_r.min().item())
-                    metrics["r/grad_max"].append(grad_r.max().item())
-                    metrics["r/mean"].append(_model.latent_gate_r.weight.mean().item())
+                if not hasattr(self, "_Lambda_init"):
+                    self._Lambda_init = _model.latent_gate_a.Lambda.detach().clone().cpu()
+                if not hasattr(self, "_r_init"):
+                    self._r_init = _model.latent_gate_r.weight.detach().clone().cpu()
+                if not hasattr(self, "_i_init"):
+                    self._i_init = _model.latent_gate_i.weight.detach().clone().cpu()
 
-                grad_i = _model.latent_gate_i.weight.grad
-                if grad_i is not None:
-                    metrics["i/grad_mean"].append(grad_i.mean().item())
-                    metrics["i/grad_std"].append(grad_i.std().item())
-                    metrics["i/grad_min"].append(grad_i.min().item())
-                    metrics["i/grad_max"].append(grad_i.max().item())
-                    metrics["i/mean"].append(_model.latent_gate_i.weight.mean().item())
+                metrics = self._metrics["train"]
+
+                # Lambda
+                param_Lambda = _model.latent_gate_a.Lambda
+                current_Lambda = param_Lambda.detach().cpu()
+                
+                if param_Lambda.grad is not None:
+                    g = param_Lambda.grad.detach().cpu()
+                    metrics["lambda/grad_mean_absolute"].append(g.abs().mean().item())
+                    metrics["lambda/grad_std"].append(g.std().item())
+                    metrics["lambda/grad_min"].append(g.min().item())
+                    metrics["lambda/grad_max"].append(g.max().item())
+                
+                Lambda_diff = (current_Lambda - self._Lambda_init).abs().mean().item()
+                metrics["lambda/mean_absolute_difference"].append(Lambda_diff)
+                
+                # Gate R
+                param_r = _model.latent_gate_r.weight
+                current_r = param_r.detach().cpu()
+                
+                if param_r.grad is not None:
+                    g = param_r.grad.detach().cpu()
+                    metrics["r/grad_mean_absolute"].append(g.abs().mean().item())
+                    metrics["r/grad_std"].append(g.std().item())
+                    metrics["r/grad_min"].append(g.min().item())
+                    metrics["r/grad_max"].append(g.max().item())
+                
+                r_diff = (current_r - self._r_init).abs().mean().item()
+                metrics["r/mean_absolute_difference"].append(r_diff)
+
+                # Gate I
+                param_i = _model.latent_gate_i.weight
+                current_i = param_i.detach().cpu()
+                
+                if param_i.grad is not None:
+                    g = param_i.grad.detach().cpu()
+                    metrics["i/grad_mean_absolute"].append(g.abs().mean().item())
+                    metrics["i/grad_std"].append(g.std().item())
+                    metrics["i/grad_min"].append(g.min().item())
+                    metrics["i/grad_max"].append(g.max().item())
+                
+                i_diff = (current_i - self._i_init).abs().mean().item()
+                metrics["i/mean_absolute_difference"].append(i_diff)
+                
+                # LoRA
+                lora_grads = []
+                for n, p in model.named_parameters():
+                    if "lora_" in n and p.grad is not None:
+                        lora_grads.append(p.grad.detach().cpu().view(-1))
+                
+                if lora_grads:
+                    all_lora_grads = torch.cat(lora_grads)
+                    metrics["lora/grad_mean_absolute"].append(all_lora_grads.abs().mean().item())
+                    metrics["lora/grad_std"].append(all_lora_grads.std().item())
+                    metrics["lora/grad_min"].append(all_lora_grads.min().item())
+                    metrics["lora/grad_max"].append(all_lora_grads.max().item())
+                
+                # Hidden Ratio Logging
+                if hasattr(self, "_hidden_ratio_values") and self._hidden_ratio_values:
+                    avg_ratio = sum(self._hidden_ratio_values) / len(self._hidden_ratio_values)
+                    metrics["a/mean_hidden_ratio"].append(avg_ratio)
+                    self._hidden_ratio_values = []
 
         return output
 
