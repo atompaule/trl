@@ -1102,13 +1102,15 @@ class HRPOTrainer(BaseTrainer):
                     metrics["r/grad_std"].append(grad_r.std().item())
                     metrics["r/grad_min"].append(grad_r.min().item())
                     metrics["r/grad_max"].append(grad_r.max().item())
-                    
+                    metrics["r/mean"].append(_model.latent_gate_r.weight.mean().item())
+
                 grad_i = _model.latent_gate_i.weight.grad
                 if grad_i is not None:
                     metrics["i/grad_mean"].append(grad_i.mean().item())
                     metrics["i/grad_std"].append(grad_i.std().item())
                     metrics["i/grad_min"].append(grad_i.min().item())
                     metrics["i/grad_max"].append(grad_i.max().item())
+                    metrics["i/mean"].append(_model.latent_gate_i.weight.mean().item())
 
         return output
 
