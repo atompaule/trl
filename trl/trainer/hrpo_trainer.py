@@ -1076,6 +1076,7 @@ class HRPOTrainer(BaseTrainer):
 
     def _register_latent_gate_hooks(self, model):
         self._hidden_ratio_values = []
+        self._at_values = []
         
         def hook_fn(module, input, output):
             # output is a_t
@@ -1086,6 +1087,7 @@ class HRPOTrainer(BaseTrainer):
                  val = torch.clamp(val, min=1e-6)
                  hidden_ratio = torch.sqrt(val)
                  self._hidden_ratio_values.append(hidden_ratio.mean().item())
+                 self._at_values.append(a_t.mean().item())
         
         for name, module in model.named_modules():
             if "LatentGateA" in module.__class__.__name__:
@@ -1160,23 +1162,48 @@ class HRPOTrainer(BaseTrainer):
                 metrics["i/mean_absolute_difference"].append(i_diff)
                 
                 # LoRA
+                # Initialize LoRA reference
+                if not hasattr(self, "_lora_init"):
+                    self._lora_init = {}
+                    for n, p in model.named_parameters():
+                        if "lora_" in n:
+                             self._lora_init[n] = p.detach().clone().cpu()
+
                 lora_grads = []
+                lora_diffs = []
                 for n, p in model.named_parameters():
-                    if "lora_" in n and p.grad is not None:
-                        lora_grads.append(p.grad.detach().cpu().view(-1))
-                
+                    if "lora_" in n:
+                        if p.grad is not None:
+                            lora_grads.append(p.grad.detach().cpu().view(-1))
+                        
+                        if n in self._lora_init:
+                            # We compute mean per parameter then average them, or sum all diffs and divide by total elements?
+                            # "mean_absolute_difference" usually means per-element average.
+                            # So we should probably aggregate sum of abs diffs and count of elements.
+                            diff = (p.detach().cpu() - self._lora_init[n]).abs()
+                            lora_diffs.append(diff.view(-1))
+
                 if lora_grads:
                     all_lora_grads = torch.cat(lora_grads)
                     metrics["lora/grad_mean_absolute"].append(all_lora_grads.abs().mean().item())
                     metrics["lora/grad_std"].append(all_lora_grads.std().item())
                     metrics["lora/grad_min"].append(all_lora_grads.min().item())
                     metrics["lora/grad_max"].append(all_lora_grads.max().item())
+
+                if lora_diffs:
+                    all_lora_diffs = torch.cat(lora_diffs)
+                    metrics["lora/mean_absolute_difference"].append(all_lora_diffs.mean().item())
                 
                 # Hidden Ratio Logging
                 if hasattr(self, "_hidden_ratio_values") and self._hidden_ratio_values:
                     avg_ratio = sum(self._hidden_ratio_values) / len(self._hidden_ratio_values)
                     metrics["a/mean_hidden_ratio"].append(avg_ratio)
                     self._hidden_ratio_values = []
+                
+                if hasattr(self, "_at_values") and self._at_values:
+                    avg_at = sum(self._at_values) / len(self._at_values)
+                    metrics["a/mean"].append(avg_at)
+                    self._at_values = []
 
         return output
 
